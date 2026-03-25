@@ -1,5 +1,9 @@
+import os
 import numpy as np
 import pandas as pd
+import mlflow
+import mlflow.sklearn
+from mlflow.models import infer_signature
 
 from collections.abc import Callable
 
@@ -11,6 +15,10 @@ from lightgbm.sklearn import LGBMClassifier
 
 from typing import Any, TypedDict
 from hyperopt import hp, tpe, fmin
+
+from matplotlib import pyplot as plt
+import matplotlib.ticker as mtick
+from sklearn.metrics import precision_recall_curve
 
 import warnings
 
@@ -66,7 +74,6 @@ def train_model(
     training_set: tuple[np.ndarray, np.ndarray],
     params: dict[str, Any] | None = None,
 ) -> BaseEstimator:
-
     model_conf = get_model_config(instance)
     params = params or {}
 
@@ -113,11 +120,37 @@ def optimize_hyp(
 
 
 def auto_ml(
-    X_train: np.ndarray, y_train: np.ndarray, X_test: np.ndarray, y_test: np.ndarray, max_evals: int = 40
-) -> dict[str, BaseEstimator]:
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    X_test: np.ndarray,
+    y_test: np.ndarray,
+    max_evals: int = 40,
+    log_to_mlflow: bool = False,
+    experiment_id: int = -1,
+) -> dict[str, BaseEstimator | str]:  # Signature mise à jour ici
+    X = pd.concat([pd.DataFrame(X_train), pd.DataFrame(X_test)], ignore_index=True)
 
-    X = pd.concat((X_train, X_test))
-    y = pd.concat((y_train, y_test))
+    # Convert y to Series
+    y_train_flat = y_train.squeeze() if isinstance(y_train, pd.DataFrame) else y_train
+    y_test_flat = y_test.squeeze() if isinstance(y_test, pd.DataFrame) else y_test
+
+    y = pd.concat([pd.Series(y_train_flat), pd.Series(y_test_flat)], ignore_index=True)
+    opt_models = []
+
+    run_id: str = ""
+    if log_to_mlflow:
+        mlflow.set_tracking_uri(os.getenv("MLFLOW_SERVER", "http://localhost:5000"))
+        exp_id = str(experiment_id)
+        try:
+            mlflow.get_experiment(exp_id)  # Verify exists
+        except mlflow.exceptions.MlflowException:
+            # Auto-create if ID=1 or name-like
+            if experiment_id == 1:
+                exp_id = mlflow.create_experiment("purchase_predict")  # Returns str ID
+
+        run: mlflow.ActiveRun = mlflow.start_run(experiment_id=exp_id)
+        run_id = run.info.run_id
+    model_specs: ModelSpec
 
     opt_models = []
     for model_specs in MODELS:
@@ -147,4 +180,39 @@ def auto_ml(
 
     # In case we have multiple models
     best_model = max(opt_models, key=lambda x: x["score"])
-    return dict(model=best_model)
+
+    # --- NOUVELLE LOGIQUE MLFLOW INTÉGRÉE ICI ---
+    if log_to_mlflow:
+        model_metrics = {"f1": best_model["score"]}
+        signature = infer_signature(X_train, best_model["model"].predict(X_train))
+
+        save_pr_curve(X_test, y_test, best_model["model"])
+
+        mlflow.log_metrics(model_metrics)
+        mlflow.log_params(best_model["params"])
+
+        # Only use if validation curves are produced
+        mlflow.log_artifacts("/data/08_reporting", artifact_path="plots")
+        mlflow.log_artifact(
+            r"C:\Users\soare\PycharmProjects\mlops_cours\purchase-predict\data\04_feature\transform_pipeline.pkl"
+        )
+
+        mlflow_info = mlflow.sklearn.log_model(best_model["model"], name="model", signature=signature)
+
+        mlflow.end_run()
+
+    return {
+        "model": best_model["model"],
+        "mlflow_run_id": run_id,
+        "mlflow_model_uri": mlflow_info.model_uri if log_to_mlflow else "",
+    }
+
+
+def save_pr_curve(X, y, model):
+    plt.figure(figsize=(16, 11))
+    prec, recall, _ = precision_recall_curve(y, model.predict_proba(X)[:, 1], pos_label=1)
+    plt.title("PR Curve", fontsize=16)
+    plt.gca().xaxis.set_major_formatter(mtick.PercentFormatter(1, 0))
+    plt.gca().yaxis.set_major_formatter(mtick.PercentFormatter(1, 0))
+    plt.savefig(os.path.expanduser("data/08_reporting/pr_curve.png"))
+    plt.close()

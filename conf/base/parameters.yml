@@ -1,4 +1,9 @@
 test_ratio: 0.3
-automl_max_evals: 10
-gcp_project_id: "<PROJET_GCP>"
-gcs_primary_folder: "<NOM_DU_BUCKET>/primary.csv"
+automl_max_evals: 1
+gcp_project_id: "project-1f216311-f68c-46f4-b35"
+gcs_primary_folder: "mlops-ia/data-test.csv"
+
+mlflow_enabled: True  # Do we log metrics and artifacts to MLflow ?
+mlflow_experiment_id: 1  # Experimented ID associated to this project
+
+mlflow_model_registry: "purchase_predict"
